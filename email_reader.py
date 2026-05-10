@@ -41,7 +41,7 @@ class EmailPaymentReader:
         """Ищет письма с платежами от ipay@ipay.by"""
         try:
             self.imap.select("INBOX")
-            status, messages = self.imap.search(None, 'FROM', 'zhmykhtv@gmail.com')
+            status, messages = self.imap.search(None, 'FROM', 'ipay@ipay.by')
             
             if status != 'OK':
                 return []
@@ -102,40 +102,45 @@ class EmailPaymentReader:
         payment = {}
         
         # ==================== НОМЕР ДОГОВОРА ====================
-        # Ищем любой вариант: ТС, TC или просто цифры
+        # Ищем номер договора - более гибкий парсер
         contract_patterns = [
-            r'Номер договора \(заказа\)\s*:\s*([ТTC]+\d+)',  # ТС22084 или TC22084
-            r'Номер договора \(заказа\)\s*:\s*(\d+)',         # Только 22084
+            r'Номер договора \(заказа\)\s*:\s*([А-Яa-zA-Z]*?)(\d+)',  # ТС22084, TC22084 или 22084
         ]
         
         contract = None
         for pattern in contract_patterns:
             match = re.search(pattern, email_body)
             if match:
-                contract = match.group(1).strip()
+                prefix = match.group(1).strip().upper()  # ТС или TC
+                number = match.group(2).strip()  # 22084
+                
+                # Приводим к стандартному формату ТСxxxx
+                prefix = prefix.replace('TC', 'ТС')
+                
+                # Если нет префикса - добавляем ТС
+                if not prefix:
+                    prefix = 'ТС'
+                
+                contract = prefix + number
                 break
         
         if contract:
-            # Приводим к стандартному формату ТСxxxx
-            contract = contract.upper()
-            # Заменяем латинскую C на кириллицу Т
-            contract = contract.replace('TC', 'ТС')
-            # Если только цифры - добавляем ТС в начало
-            if contract.isdigit():
-                contract = 'ТС' + contract
             payment['contract'] = contract
+            logger.info(f"✅ Контракт: {contract}")
         
         # ==================== ФИО ====================
         fio_pattern = r'ФИО\s*:\s*([А-Яа-я\s]+?)(?:\n|$)'
         fio_match = re.search(fio_pattern, email_body)
         if fio_match:
             payment['fio'] = fio_match.group(1).strip()
+            logger.info(f"✅ ФИО: {payment['fio']}")
         
         # ==================== СУММА ====================
         amount_pattern = r'Сумма\s*:\s*([\d.]+)'
         amount_match = re.search(amount_pattern, email_body)
         if amount_match:
             payment['amount'] = amount_match.group(1).strip()
+            logger.info(f"✅ Сумма: {payment['amount']}")
         
         # ==================== ДАТА ====================
         date_pattern = r'Оплачено \(дата/время\)\s*:\s*(\d{4})\.(\d{2})\.(\d{2})\s+(\d{2}):(\d{2}):(\d{2})'
@@ -144,8 +149,13 @@ class EmailPaymentReader:
             payment['date'] = f"{date_match.group(3)}.{date_match.group(2)}.{date_match.group(1)}"
             payment['month'] = int(date_match.group(2))
             payment['year'] = date_match.group(1)
+            logger.info(f"✅ Дата: {payment['date']}, месяц: {payment['month']}")
         
-        logger.info(f"✅ Платеж распарсен: {payment.get('contract')} - {payment.get('amount')} руб.")
+        if not payment.get('contract'):
+            logger.error(f"❌ Номер договора не найден!")
+        if not payment.get('month'):
+            logger.error(f"❌ Дата не найдена!")
+        
         return payment
     
     def get_new_payments(self) -> list:
@@ -160,7 +170,7 @@ class EmailPaymentReader:
             for attachment in attachments:
                 payment = self.parse_payment_email(attachment)
                 
-                if payment.get('contract') and payment.get('amount'):
+                if payment.get('contract') and payment.get('amount') and payment.get('month'):
                     logger.info(f"✅ New: {payment.get('contract')}")
                     payments.append(payment)
                 else:
