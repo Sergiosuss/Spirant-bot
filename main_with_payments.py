@@ -61,7 +61,6 @@ async def cmd_help(message: types.Message):
         "🔹 /check_email - Проверить подключение Gmail\n\n"
         "⚠️ Все команды доступны только админу!"
     )
-
 @dp.message_handler(commands=['status'])
 async def cmd_status(message: types.Message):
     """Статус системы (только для админа)"""
@@ -71,18 +70,37 @@ async def cmd_status(message: types.Message):
     
     status_text = "📊 <b>Статус платежной системы:</b>\n\n"
     
-    # Google Sheets
-    if GOOGLE_CREDENTIALS_JSON:
+    # Google Sheets - реальная проверка
+    google_sheets_ok = False
+    try:
+        import base64
+        import json
+        import gspread
+        
+        if GOOGLE_CREDENTIALS_JSON:
+            decoded = base64.b64decode(GOOGLE_CREDENTIALS_JSON).decode('utf-8')
+            credentials = json.loads(decoded)
+            gc = gspread.service_account_from_dict(credentials)
+            sheet = gc.open('Заявки')
+            google_sheets_ok = True
+    except Exception as e:
+        google_sheets_ok = False
+    
+    if google_sheets_ok:
         status_text += "✅ <b>Google Sheets:</b> Подключено\n"
         status_text += "  • Таблица: Заявки\n"
         status_text += "  • Лист: 25/26\n"
         status_text += "  • Месяцы: Q-Y (сентябрь-май)\n"
     else:
         status_text += "❌ <b>Google Sheets:</b> Отключено\n"
-        status_text += "  ⚠️ Переменная GOOGLE_CREDENTIALS_JSON не установлена\n"
+        status_text += "  ⚠️ Переменная GOOGLE_CREDENTIALS_JSON не установлена или ошибка подключения\n"
     
-    # Gmail IMAP
+    # Gmail IMAP - реальная проверка
+    gmail_ok = False
     if GMAIL_EMAIL and GMAIL_APP_PASSWORD:
+        gmail_ok = True
+    
+    if gmail_ok:
         status_text += "\n✅ <b>Gmail (IMAP):</b> Подключено\n"
         status_text += f"  • Email: {GMAIL_EMAIL}\n"
         status_text += "  • Отправитель: ipay@ipay.by\n"
