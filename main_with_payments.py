@@ -298,14 +298,7 @@ async def on_shutdown(dispatcher):
 # ========== ЗАПУСК БОТА ==========
 
 if __name__ == '__main__':
-    # Регистрируем обработчики жизненного цикла
-    dp.register_startup_handler(on_startup)
-    dp.register_shutdown_handler(on_shutdown)
-    
-    # Запускаем бота
     executor.start_polling(
         dp,
-        skip_updates=True,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown
+        skip_updates=True
     )
