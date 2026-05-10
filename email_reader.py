@@ -72,7 +72,6 @@ class EmailPaymentReader:
                     msg = email.message_from_bytes(msg_data[0][1])
                     email_body = ""
                     
-                    # Сначала ищем в теле письма
                     if msg.is_multipart():
                         for part in msg.walk():
                             content_type = part.get_content_type()
@@ -89,10 +88,8 @@ class EmailPaymentReader:
                         except:
                             email_body = msg.get_payload(decode=False)
                     
-                    # Пытаемся распарсить
                     payment = self.parse_payment_email(email_body)
                     
-                    # ЕСЛИ НЕ НАШЛИ В ТЕЛЕ - ИЩЕМ В ВЛОЖЕНИЯХ
                     if not payment and msg.is_multipart():
                         logger.info(f"📎 Ищу в вложениях...")
                         for part in msg.walk():
@@ -100,10 +97,20 @@ class EmailPaymentReader:
                                 filename = part.get_filename()
                                 logger.info(f"  📄 Файл: {filename}")
                                 
-                                # Если это .txt файл - читаем его
                                 if filename and filename.endswith('.txt'):
                                     try:
-                                        attachment_body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                        attachment_body = None
+                                        for encoding in ['utf-8', 'cp1251', 'windows-1251', 'latin-1', 'iso-8859-1']:
+                                            try:
+                                                attachment_body = part.get_payload(decode=True).decode(encoding)
+                                                logger.info(f"  ✅ Кодировка: {encoding}")
+                                                break
+                                            except:
+                                                continue
+                                        
+                                        if not attachment_body:
+                                            attachment_body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                        
                                         logger.debug(f"  Содержимое: {attachment_body[:200]}")
                                         payment = self.parse_payment_email(attachment_body)
                                         
