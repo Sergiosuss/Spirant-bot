@@ -41,7 +41,7 @@ class EmailPaymentReader:
         """Ищет письма с платежами от ipay@ipay.by"""
         try:
             self.imap.select("INBOX")
-            status, messages = self.imap.search(None, 'FROM', 'ipay@ipay.by')
+            status, messages = self.imap.search(None, 'FROM', 'zhmykhtv@gmail.com')
             
             if status != 'OK':
                 return []
