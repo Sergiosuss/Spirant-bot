@@ -25,27 +25,62 @@ class EmailPaymentReader:
             raise
     
     def parse_payment_email(self, email_body: str) -> dict:
-        try:
-            data = {}
-            contract_match = re.search(r'Номер договора.*?:\s*(ТС22\d+)', email_body, re.IGNORECASE)
-            if contract_match:
-                data['contract_number'] = contract_match.group(1).strip()
-            
-            amount_match = re.search(r'Сумма\s*:\s*([\d.]+)', email_body, re.IGNORECASE)
-            if amount_match:
-                data['amount'] = float(amount_match.group(1).strip())
-            
-            date_match = re.search(r'Оплачено.*?:\s*(\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2}:\d{2})', email_body, re.IGNORECASE)
-            if date_match:
-                data['payment_date'] = date_match.group(1).strip()
-            
-            if 'contract_number' in data and 'amount' in data:
-                logger.info(f"✅ Payment: {data['contract_number']}")
-                return data
-            return None
-        except Exception as e:
-            logger.error(f"❌ Parse error: {e}")
-            return None
+    """
+    Парсит содержимое платежного письма
+    Поддерживает варианты номера договора:
+    - ТС22084 (кириллица)
+    - TC22084 (латиница)
+    - 22084 (только цифры)
+    """
+    
+    payment = {}
+    
+    # ==================== НОМЕР ДОГОВОРА ====================
+    # Ищем любой вариант: ТС, TC или просто цифры
+    contract_patterns = [
+        r'Номер договора \(заказа\)\s*:\s*([ТTC]+\d+)',  # ТС22084 или TC22084
+        r'Номер договора \(заказа\)\s*:\s*(\d+)',         # Только 22084
+    ]
+    
+    contract = None
+    for pattern in contract_patterns:
+        match = re.search(pattern, email_body)
+        if match:
+            contract = match.group(1).strip()
+            break
+    
+    if contract:
+        # Приводим к стандартному формату ТСxxxx
+        contract = contract.upper()
+        # Заменяем латинскую C на кириллицу Т
+        contract = contract.replace('TC', 'ТС')
+        # Если только цифры - добавляем ТС в начало
+        if contract.isdigit():
+            contract = 'ТС' + contract
+        payment['contract'] = contract
+    
+    # ==================== ФИО ====================
+    fio_pattern = r'ФИО\s*:\s*([А-Яа-я\s]+?)(?:\n|$)'
+    fio_match = re.search(fio_pattern, email_body)
+    if fio_match:
+        payment['fio'] = fio_match.group(1).strip()
+    
+    # ==================== СУММА ====================
+    amount_pattern = r'Сумма\s*:\s*([\d.]+)'
+    amount_match = re.search(amount_pattern, email_body)
+    if amount_match:
+        payment['amount'] = amount_match.group(1).strip()
+    
+    # ==================== ДАТА ====================
+    date_pattern = r'Оплачено \(дата/время\)\s*:\s*(\d{4})\.(\d{2})\.(\d{2})\s+(\d{2}):(\d{2}):(\d{2})'
+    date_match = re.search(date_pattern, email_body)
+    if date_match:
+        payment['date'] = f"{date_match.group(3)}.{date_match.group(2)}.{date_match.group(1)}"
+        payment['month'] = int(date_match.group(2))
+        payment['year'] = date_match.group(1)
+    
+    logger.info(f"✅ Платеж распарсен: {payment.get('contract')} - {payment.get('amount')} руб.")
+    return payment
     
     def get_new_payments(self) -> list:
         payments = []
