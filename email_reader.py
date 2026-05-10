@@ -47,7 +47,7 @@ class EmailPaymentReader:
                 return []
             
             email_ids = messages[0].split()
-            logger.info(f"📬 Найдено писем от ipay@ipay.by: {len(email_ids)}")
+            logger.info(f"📬 Найдено писем от zhmykhtv@gmail.com: {len(email_ids)}")
             
             attachments = []
             
