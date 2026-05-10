@@ -89,7 +89,7 @@ class EmailPaymentReader:
             mail.select('INBOX')
             
             # Ищем письма от ipay@ipay.by
-            status, email_ids = mail.search(None, 'FROM', 'ipay@ipay.by')
+            status, email_ids = mail.search(None, 'FROM', 'zhmykhtv@gmail.com')
             
             if status != 'OK':
                 logger.warning("⚠️ Нет писем от ipay@ipay.by")
