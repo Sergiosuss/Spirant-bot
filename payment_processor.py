@@ -7,7 +7,7 @@ import base64
 
 logger = logging.getLogger(__name__)
 
-class PaymentProcessor:  # ← ПРАВИЛЬНОЕ ИМЯ (без Speerant)
+class PaymentProcessor:
     def __init__(self):
         self.sheet_id = "1ZTDM8Ea-niTFVPly2ElrUQ00ztlGRFBWhE-seIrMnwY"
         self.sheet_name = "25/26"
@@ -20,24 +20,47 @@ class PaymentProcessor:  # ← ПРАВИЛЬНОЕ ИМЯ (без Speerant)
         }
         
         self.red_color = {"red": 1, "green": 0, "blue": 0}
+        self.service = None
         
         try:
-            creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-            if creds_json:
-                creds_data = json.loads(base64.b64decode(creds_json))
-                self.creds = Credentials.from_service_account_info(creds_data)
-            else:
-                self.creds = None
+            logger.info("🔍 Инициализация PaymentProcessor начата...")
             
+            creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+            logger.info(f"📝 GOOGLE_CREDENTIALS_JSON есть: {bool(creds_json)}")
+            
+            if not creds_json:
+                logger.error("❌ GOOGLE_CREDENTIALS_JSON не установлена!")
+                return
+            
+            logger.info("📦 Декодирование base64...")
+            decoded = base64.b64decode(creds_json)
+            logger.info(f"✅ Декодировано {len(decoded)} байт")
+            
+            logger.info("📄 Парсинг JSON...")
+            creds_data = json.loads(decoded)
+            logger.info(f"✅ JSON распарсен, ключи: {list(creds_data.keys())}")
+            
+            logger.info("🔐 Создание credentials...")
+            self.creds = Credentials.from_service_account_info(creds_data)
+            logger.info("✅ Credentials созданы")
+            
+            logger.info("🔨 Создание Google Sheets сервиса...")
             self.service = build('sheets', 'v4', credentials=self.creds)
-            logger.info("✅ Google Sheets инициализирован")
+            logger.info("✅ Google Sheets инициализирован успешно!")
+            
         except Exception as e:
-            logger.error(f"❌ Ошибка инициализации Google Sheets: {e}")
+            logger.error(f"❌ ОШИБКА: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self.service = None
     
     def find_contract_row(self, contract_number: str) -> int:
         """Ищет номер строки по номеру контракта"""
         try:
+            if not self.service:
+                logger.error("❌ Service не инициализирован в find_contract_row")
+                return None
+                
             range_name = f"{self.sheet_name}!{self.contract_col}:{self.contract_col}"
             result = self.service.spreadsheets().values().get(
                 spreadsheetId=self.sheet_id,
@@ -60,6 +83,10 @@ class PaymentProcessor:  # ← ПРАВИЛЬНОЕ ИМЯ (без Speerant)
     def update_payment(self, contract_number: str, amount: float, payment_date: str) -> bool:
         """Обновляет платёж в Google Sheets СУММОЙ красным цветом"""
         try:
+            if not self.service:
+                logger.error("❌ Service не инициализирован в update_payment")
+                return False
+                
             row = self.find_contract_row(contract_number)
             if not row:
                 return False
@@ -74,7 +101,6 @@ class PaymentProcessor:  # ← ПРАВИЛЬНОЕ ИМЯ (без Speerant)
             
             cell = f"{self.sheet_name}!{col}{row}"
             
-            # ПИШЕМ СУММУ КРАСНЫМ!
             self.service.spreadsheets().values().update(
                 spreadsheetId=self.sheet_id,
                 range=cell,
@@ -95,6 +121,10 @@ class PaymentProcessor:  # ← ПРАВИЛЬНОЕ ИМЯ (без Speerant)
     def apply_red_color(self, row: int, col: str):
         """Применяет красный цвет к ячейке"""
         try:
+            if not self.service:
+                logger.warning("⚠️ Service не инициализирован для цвета")
+                return
+                
             col_index = ord(col) - ord('A')
             
             requests = [
@@ -125,7 +155,7 @@ class PaymentProcessor:  # ← ПРАВИЛЬНОЕ ИМЯ (без Speerant)
             logger.info(f"✅ Красный цвет применён: {col}{row}")
         
         except Exception as e:
-            logger.warning(f"⚠️ Ошибка применения цвета (не критично): {e}")
+            logger.warning(f"⚠️ Ошибка применения цвета: {e}")
     
     def process_payments(self, payments: list) -> dict:
         """Обрабатывает список платежей"""
