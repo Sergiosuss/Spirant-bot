@@ -1,210 +1,144 @@
-import gspread
 import logging
-import base64
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+import os
 import json
-from datetime import datetime
+import base64
 
 logger = logging.getLogger(__name__)
 
 class PaymentProcessor:
-    """Обновляет Google Sheets платежами (красным цветом для бота)"""
-    
-    # Константы для таблицы
-    SHEET_NAME = "25/26"
-    CONTRACT_COL = "J"  # Номер договора
-    NAME_COL = "B"     # ФИО
-    
-    # Месяцы в колонках (сентябрь-май)
-    MONTHS_TO_COLUMNS = {
-        9: "Q",   # Сентябрь
-        10: "R",  # Октябрь
-        11: "S",  # Ноябрь
-        12: "T",  # Декабрь
-        1: "U",   # Январь
-        2: "V",   # Февраль
-        3: "W",   # Март
-        4: "X",   # Апрель
-        5: "Y"    # Май
-    }
-    
-    # Красный цвет для текста (для платежей от бота)
-    RED_COLOR = {
-        "red": 1,
-        "green": 0,
-        "blue": 0
-    }
-    
-    def __init__(self, google_creds_json: str):
-        """Инициализирует processor с credentials"""
+    def __init__(self):
+        self.sheet_id = "1ZTDM8Ea-niTFVPly2ElrUQ00ztlGRFBWhE-seIrMnwY"
+        self.sheet_name = "25/26"
+        self.contract_col = "J"
+        self.name_col = "B"
+        
+        self.months_to_columns = {
+            9: "Q", 10: "R", 11: "S", 12: "T",
+            1: "U", 2: "V", 3: "W", 4: "X", 5: "Y"
+        }
+        
+        self.red_color = {"red": 1, "green": 0, "blue": 0}
+        
         try:
-            # Декодируем base64 credentials
-            decoded = base64.b64decode(google_creds_json).decode('utf-8')
-            credentials = json.loads(decoded)
+            creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+            if creds_json:
+                creds_data = json.loads(base64.b64decode(creds_json))
+                self.creds = Credentials.from_service_account_info(creds_data)
+            else:
+                self.creds = None
             
-            # Подключаемся к Google Sheets
-            self.gc = gspread.service_account_from_dict(credentials)
-            self.sheet = self.gc.open('Заявки').worksheet(self.SHEET_NAME)
-            
+            self.service = build('sheets', 'v4', credentials=self.creds)
             logger.info("✅ Google Sheets инициализирован")
         except Exception as e:
-            logger.error(f"❌ Ошибка инициализации Google Sheets: {e}")
-            raise
+            logger.error(f"❌ Ошибка инициализации: {e}")
+            self.service = None
     
     def find_contract_row(self, contract_number: str) -> int:
-        """Находит строку контракта в таблице"""
+        """Ищет номер строки по номеру контракта"""
         try:
-            # Ищем номер контракта в колонке J
-            cell = self.sheet.find(contract_number)
-            if cell:
-                logger.info(f"✅ Найден контракт {contract_number} в строке {cell.row}")
-                return cell.row
-            else:
-                logger.warning(f"⚠️ Контракт {contract_number} не найден в таблице")
-                return None
+            range_name = f"{self.sheet_name}!{self.contract_col}:{self.contract_col}"
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=self.sheet_id,
+                range=range_name
+            ).execute()
+            
+            values = result.get('values', [])
+            
+            for idx, row in enumerate(values, start=1):
+                if row and row[0].strip() == contract_number.strip():
+                    logger.info(f"✅ Найден контракт {contract_number} в строке {idx}")
+                    return idx
+            
+            logger.warning(f"⚠️ Контракт {contract_number} не найден")
+            return None
         except Exception as e:
-            logger.error(f"❌ Ошибка поиска контракта: {e}")
+            logger.error(f"❌ Ошибка поиска: {e}")
             return None
     
-    def get_payment_month(self, payment_date: str) -> int:
-        """Извлекает месяц из даты платежа (формат: 2026.05.09)"""
+    def update_payment(self, contract_number: str, amount: float, payment_date: str) -> bool:
+        """Обновляет платёж с суммой КРАСНЫМ ЦВЕТОМ"""
         try:
-            # Парсим дату
-            date_obj = datetime.strptime(payment_date[:10], '%Y.%m.%d')
-            month = date_obj.month
-            
-            # Возвращаем месяц (1-12)
-            return month
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка парсинга даты: {e}")
-            return None
-    
-    def update_payment(self, payment: dict) -> bool:
-        """Обновляет таблицу с новым платежом (красным цветом)"""
-        try:
-            contract_number = payment.get('contract_number')
-            amount = payment.get('amount')
-            payment_date = payment.get('payment_date', '')
-            
-            # Находим строку контракта
             row = self.find_contract_row(contract_number)
             if not row:
                 return False
             
-            # Определяем месяц платежа
-            month = self.get_payment_month(payment_date)
-            if not month or month not in self.MONTHS_TO_COLUMNS:
-                logger.warning(f"⚠️ Неправильный месяц платежа: {month}")
+            date_parts = payment_date.split('.')
+            month = int(date_parts[1])
+            
+            col = self.months_to_columns.get(month)
+            if not col:
+                logger.warning(f"⚠️ Месяц {month} не поддерживается")
                 return False
             
-            # Получаем колонку месяца
-            month_col = self.MONTHS_TO_COLUMNS[month]
-            cell_address = f"{month_col}{row}"
+            cell = f"{self.sheet_name}!{col}{row}"
             
-            # Определяем что писать (зависит от суммы)
-            # 184 = полный платеж
-            # 92 = половина
-            # 46 = четверть
-            # 0 = не оплачено
-            if amount >= 184:
-                mark = "✓"  # Полный платеж
-            elif amount >= 92:
-                mark = "½"  # Половина
-            elif amount >= 46:
-                mark = "¼"  # Четверть
-            else:
-                mark = "0"  # Не оплачено
+            # Пишем СУММУ в ячейку
+            self.service.spreadsheets().values().update(
+                spreadsheetId=self.sheet_id,
+                range=cell,
+                valueInputOption='USER_ENTERED',
+                body={'values': [[amount]]}
+            ).execute()
             
-            # Обновляем ячейку
-            self.sheet.update_cell(row, ord(month_col) - ord('A') + 1, mark)
+            logger.info(f"✅ Платеж: {contract_number} {col}{row} = {amount} (красный)")
             
-            # Применяем красный цвет текста
-            self._set_cell_color_red(cell_address)
+            # Применяем красный цвет
+            self.apply_red_color(row, col)
             
-            logger.info(f"✅ Платеж обновлён: {contract_number} {month_col}{row} = {mark} (красный)")
             return True
         
         except Exception as e:
-            logger.error(f"❌ Ошибка обновления платежа: {e}")
+            logger.error(f"❌ Ошибка: {e}")
             return False
     
-    def _set_cell_color_red(self, cell_address: str):
-        """Устанавливает красный цвет текста для ячейки"""
+    def apply_red_color(self, row: int, col: str):
+        """Применяет красный цвет к ячейке"""
         try:
-            # Используем Google Sheets API для форматирования
-            from googleapiclient.discovery import build
+            col_index = ord(col) - ord('A')
             
-            # Получаем spreadsheet_id из sheet
-            spreadsheet_id = self.sheet.spreadsheet.id
-            
-            # Парсим адрес ячейки (например, "J5")
-            col_letter = cell_address[0]
-            row_number = int(cell_address[1:])
-            
-            # Преобразуем букву в индекс колонки (A=0, B=1, и т.д.)
-            col_index = ord(col_letter) - ord('A')
-            
-            # Создаём request для форматирования
-            request_body = {
-                'requests': [
-                    {
-                        'repeatCell': {
-                            'range': {
-                                'sheetId': self.sheet.id,
-                                'rowIndex': row_number - 1,
-                                'columnIndex': col_index,
-                                'endRowIndex': row_number,
-                                'endColumnIndex': col_index + 1
-                            },
-                            'cell': {
-                                'userEnteredFormat': {
-                                    'textFormat': {
-                                        'foregroundColor': {
-                                            'red': 1.0,  # Красный
-                                            'green': 0.0,
-                                            'blue': 0.0
-                                        }
-                                    }
-                                }
-                            },
-                            'fields': 'userEnteredFormat.textFormat.foregroundColor'
+            requests = [
+                {
+                    "updateCellStyle": {
+                        "range": {
+                            "sheetId": 1,
+                            "rowIndex": row - 1,
+                            "columnIndex": col_index,
+                            "endRowIndex": row,
+                            "endColumnIndex": col_index + 1
+                        },
+                        "fields": "userEnteredFormat.textFormat.foregroundColor",
+                        "style": {
+                            "textFormat": {
+                                "foregroundColor": self.red_color
+                            }
                         }
                     }
-                ]
-            }
+                }
+            ]
             
-            # Применяем форматирование
-            service = build('sheets', 'v4', static_discovery=False)
-            service.spreadsheets().batchUpdate(
-                spreadsheetId=spreadsheet_id,
-                body=request_body
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=self.sheet_id,
+                body={'requests': requests}
             ).execute()
-            
-            logger.info(f"✅ Красный цвет применён к {cell_address}")
         
         except Exception as e:
-            logger.warning(f"⚠️ Ошибка применения красного цвета (не критично): {e}")
-            # Не прерываем процесс если цвет не применился
+            logger.warning(f"⚠️ Ошибка цвета: {e}")
     
     def process_payments(self, payments: list) -> dict:
-        """Обрабатывает список платежей"""
-        result = {
-            'total': len(payments),
-            'success': 0,
-            'failed': 0,
-            'details': []
-        }
+        """Обрабатывает платежи"""
+        result = {'successful': 0, 'failed': 0}
         
         for payment in payments:
-            try:
-                if self.update_payment(payment):
-                    result['success'] += 1
-                    result['details'].append(f"✅ {payment['contract_number']}")
-                else:
-                    result['failed'] += 1
-                    result['details'].append(f"❌ {payment['contract_number']}")
-            except Exception as e:
+            if self.update_payment(
+                payment['contract_number'],
+                payment['amount'],
+                payment['payment_date']
+            ):
+                result['successful'] += 1
+            else:
                 result['failed'] += 1
-                result['details'].append(f"❌ {payment.get('contract_number', 'unknown')}: {str(e)}")
         
-        logger.info(f"📊 Обработано платежей: {result['success']}/{result['total']}")
+        logger.info(f"📊 Обработано: {result['successful']}/{len(payments)}")
         return result
