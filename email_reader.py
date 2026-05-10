@@ -72,20 +72,53 @@ class EmailPaymentReader:
                     msg = email.message_from_bytes(msg_data[0][1])
                     email_body = ""
                     
+                    # Сначала ищем в теле письма
                     if msg.is_multipart():
                         for part in msg.walk():
-                            if part.get_content_type() == "text/plain":
-                                email_body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                                break
+                            content_type = part.get_content_type()
+                            
+                            if content_type == "text/plain":
+                                try:
+                                    email_body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                    break
+                                except:
+                                    pass
                     else:
-                        email_body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        try:
+                            email_body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        except:
+                            email_body = msg.get_payload(decode=False)
                     
+                    # Пытаемся распарсить
                     payment = self.parse_payment_email(email_body)
+                    
+                    # ЕСЛИ НЕ НАШЛИ В ТЕЛЕ - ИЩЕМ В ВЛОЖЕНИЯХ
+                    if not payment and msg.is_multipart():
+                        logger.info(f"📎 Ищу в вложениях...")
+                        for part in msg.walk():
+                            if part.get_content_disposition() == 'attachment':
+                                filename = part.get_filename()
+                                logger.info(f"  📄 Файл: {filename}")
+                                
+                                # Если это .txt файл - читаем его
+                                if filename and filename.endswith('.txt'):
+                                    try:
+                                        attachment_body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                        logger.debug(f"  Содержимое: {attachment_body[:200]}")
+                                        payment = self.parse_payment_email(attachment_body)
+                                        
+                                        if payment:
+                                            logger.info(f"✅ Найден платёж во вложении!")
+                                            break
+                                    except Exception as e:
+                                        logger.warning(f"  ⚠️ Ошибка чтения вложения: {e}")
                     
                     if payment:
                         payments.append(payment)
                         self.processed_emails.add(email_id.decode())
                         logger.info(f"✅ New: {payment['contract_number']}")
+                    else:
+                        logger.warning(f"⚠️ Не найдено данных платежа в письме")
                 
                 except Exception as e:
                     logger.warning(f"⚠️ Error: {e}")
