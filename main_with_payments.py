@@ -1,12 +1,17 @@
 import logging
 import os
+import json
+import base64
+from typing import Dict, Any
 from dotenv import load_dotenv
 from aiogram import Bot, types
 from aiogram.dispatcher import Dispatcher
 from aiogram.utils import executor
 from apscheduler.schedulers.background import BackgroundScheduler
+
+# Импортируем модули
 from email_reader import EmailPaymentReader
-from payment_processor import PaymentProcessor
+from payment_processor import SpeerantPaymentProcessor
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -16,7 +21,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID', '0'))
 GMAIL_EMAIL = os.getenv('GMAIL_EMAIL')
 GMAIL_APP_PASSWORD = os.getenv('GMAIL_APP_PASSWORD')
-GOOGLE_CREDENTIALS_JSON = os.getenv('GOOGLE_CREDENTIALS_JSON')
+GOOGLE_CREDENTIALS_FILE = 'google_creds.json'
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN, parse_mode=types.ParseMode.HTML)
@@ -31,7 +36,55 @@ EMAIL_READER = None
 PAYMENT_PROCESSOR = None
 SCHEDULER_RUNNING = False
 
-# Проверка админа
+# ==================== ЗАГРУЗКА GOOGLE CREDENTIALS ====================
+
+def load_google_credentials() -> Dict[str, Any]:
+    """Загружает учетные данные Google из переменной окружения или файла"""
+    
+    # СПОСОБ 1: Из переменной окружения (Render.com)
+    creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
+    if creds_json:
+        try:
+            logger.info("📝 Читаю GOOGLE_CREDENTIALS_JSON из переменной окружения...")
+            
+            # Пробуем декодировать как base64
+            try:
+                decoded = base64.b64decode(creds_json)
+                creds = json.loads(decoded.decode('utf-8'))
+                logger.info("✅ Успешно декодирован base64 JSON")
+            except:
+                # Если не base64, пробуем парсить как обычный JSON
+                creds = json.loads(creds_json)
+                logger.info("✅ Успешно распарсен JSON")
+            
+            # Сохраняем в файл для дальнейшего использования
+            with open(GOOGLE_CREDENTIALS_FILE, 'w') as f:
+                json.dump(creds, f)
+            logger.info("✅ Сохранён google_creds.json")
+            
+            return creds
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки GOOGLE_CREDENTIALS_JSON: {e}")
+            return {}
+    
+    # СПОСОБ 2: Из файла (локальная разработка)
+    try:
+        with open(GOOGLE_CREDENTIALS_FILE, 'r') as f:
+            creds = json.load(f)
+        logger.info(f"✅ Загружены Google credentials из {GOOGLE_CREDENTIALS_FILE}")
+        return creds
+    except FileNotFoundError:
+        logger.error(f"❌ Файл {GOOGLE_CREDENTIALS_FILE} не найден!")
+        logger.error("❌ Переменная GOOGLE_CREDENTIALS_JSON тоже не установлена!")
+        logger.error("💡 На Render добавьте переменную окружения GOOGLE_CREDENTIALS_JSON")
+        return {}
+    except json.JSONDecodeError:
+        logger.error(f"❌ Ошибка парсинга {GOOGLE_CREDENTIALS_FILE}")
+        return {}
+
+# ==================== ПРОВЕРКА АДМИНА ====================
+
 def is_admin(user_id: int) -> bool:
     """Проверяет, является ли пользователь админом"""
     return user_id == ADMIN_CHAT_ID
@@ -52,13 +105,27 @@ def init_modules():
         logger.warning(f"⚠️ Email Reader ошибка: {e}")
     
     try:
-        if GOOGLE_CREDENTIALS_JSON:
-            PAYMENT_PROCESSOR = PaymentProcessor(GOOGLE_CREDENTIALS_JSON)
-            logger.info("✅ Payment Processor инициализирован")
+        google_creds = load_google_credentials()
+        
+        if not google_creds:
+            logger.error("❌ Google credentials не загружены!")
+            return
+        
+        PAYMENT_PROCESSOR = SpeerantPaymentProcessor(
+            google_creds_dict=google_creds,
+            bot=bot,
+            admin_chat_id=ADMIN_CHAT_ID
+        )
+        
+        if PAYMENT_PROCESSOR.connect_to_sheet():
+            logger.info("✅ Payment Processor инициализирован и подключен к Google Sheets")
         else:
-            logger.warning("⚠️ Payment Processor не инициализирован (отсутствуют credentials)")
+            logger.error("❌ Payment Processor не смог подключиться к Google Sheets")
+            PAYMENT_PROCESSOR = None
+    
     except Exception as e:
-        logger.warning(f"⚠️ Payment Processor ошибка: {e}")
+        logger.error(f"❌ Payment Processor ошибка: {e}")
+        PAYMENT_PROCESSOR = None
 
 # ==================== КОМАНДЫ ====================
 
@@ -100,26 +167,22 @@ async def cmd_status(message: types.Message):
     status_text = "📊 <b>Статус платежной системы:</b>\n\n"
     
     # Google Sheets
-    if GOOGLE_CREDENTIALS_JSON:
+    if PAYMENT_PROCESSOR and PAYMENT_PROCESSOR.sheet:
         status_text += "✅ <b>Google Sheets:</b> Подключено\n"
         status_text += "  • Таблица: Заявки\n"
         status_text += "  • Лист: 25/26\n"
         status_text += "  • Месяцы: Q-Y (сентябрь-май)\n"
     else:
         status_text += "❌ <b>Google Sheets:</b> Отключено\n"
-        status_text += "  ⚠️ Переменная GOOGLE_CREDENTIALS_JSON не установлена\n"
     
     # Gmail IMAP
-    if GMAIL_EMAIL and GMAIL_APP_PASSWORD:
+    if EMAIL_READER:
         status_text += "\n✅ <b>Gmail (IMAP):</b> Подключено\n"
         status_text += f"  • Email: {GMAIL_EMAIL}\n"
         status_text += "  • Отправитель: ipay@ipay.by\n"
         status_text += "  • Проверка: каждый час\n"
     else:
         status_text += "\n❌ <b>Gmail (IMAP):</b> Отключено\n"
-        if GMAIL_EMAIL:
-            status_text += f"  • Email: {GMAIL_EMAIL}\n"
-        status_text += "  ⚠️ App Password не установлен\n"
     
     # Планировщик
     status_text += "\n"
@@ -140,7 +203,7 @@ async def cmd_check_sheet(message: types.Message):
         await message.reply("❌ <b>Доступ запрещен!</b>")
         return
     
-    if not PAYMENT_PROCESSOR:
+    if not PAYMENT_PROCESSOR or not PAYMENT_PROCESSOR.sheet:
         await message.reply("❌ <b>Google Sheets не инициализирован</b>")
         return
     
@@ -207,15 +270,10 @@ async def cmd_sync(message: types.Message):
         # Отправляем результат
         response = f"✅ <b>Синхронизация завершена!</b>\n\n"
         response += f"📊 <b>Результаты:</b>\n"
-        response += f"  • Всего: {result['total']}\n"
-        response += f"  • Успешно: {result['success']} ✅\n"
+        response += f"  • Всего: {result['successful'] + result['failed']}\n"
+        response += f"  • Успешно: {result['successful']} ✅\n"
         response += f"  • Ошибок: {result['failed']} ❌\n\n"
-        response += "🔴 Все платежи написаны <b>красным цветом</b> для проверки\n\n"
-        
-        if result['details']:
-            response += "<b>Детали:</b>\n"
-            for detail in result['details']:
-                response += f"  {detail}\n"
+        response += "🔴 Все платежи написаны <b>красным цветом</b>\n"
         
         await message.reply(response)
     
@@ -254,14 +312,9 @@ async def check_payments_job():
         
         # Отправляем уведомление админу
         message_text = f"📬 <b>Найдены новые платежи!</b>\n\n"
-        message_text += f"✅ Успешно: {result['success']}\n"
+        message_text += f"✅ Успешно: {result['successful']}\n"
         message_text += f"❌ Ошибок: {result['failed']}\n\n"
-        message_text += "🔴 Платежи обновлены <b>красным цветом</b>\n\n"
-        
-        if result['details']:
-            message_text += "<b>Детали:</b>\n"
-            for detail in result['details'][:5]:  # Первые 5
-                message_text += f"  {detail}\n"
+        message_text += "🔴 Платежи обновлены <b>красным цветом</b>\n"
         
         await bot.send_message(ADMIN_CHAT_ID, message_text)
         logger.info(f"✅ Платежи обработаны и админ уведомлён")
@@ -277,14 +330,13 @@ async def on_startup(dp):
     """При запуске бота"""
     global SCHEDULER_RUNNING
     
-    logger.info("=" * 50)
-    logger.info("SPIRANT PAYMENT BOT (WITH PAYMENTS)")
-    logger.info("=" * 50)
+    logger.info("=" * 60)
+    logger.info("🚀 SPIRANT PAYMENT BOT - ЗАПУСК")
+    logger.info("=" * 60)
     logger.info(f"✅ BOT_TOKEN: loaded")
     logger.info(f"✅ ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
     logger.info(f"📧 GMAIL_EMAIL: {GMAIL_EMAIL if GMAIL_EMAIL else '❌'}")
-    logger.info(f"📊 Google Sheets: {'✅' if GOOGLE_CREDENTIALS_JSON else '❌'}")
-    logger.info("=" * 50)
+    logger.info("=" * 60)
     
     # Инициализируем модули
     init_modules()
@@ -295,8 +347,9 @@ async def on_startup(dp):
     scheduler.start()
     SCHEDULER_RUNNING = True
     
-    logger.info("🚀 Бот запущен!")
+    logger.info("✅ Бот запущен!")
     logger.info("✅ Планировщик запущен (проверка каждый час)")
+    logger.info("=" * 60)
 
 async def on_shutdown(dp):
     """При остановке бота"""
