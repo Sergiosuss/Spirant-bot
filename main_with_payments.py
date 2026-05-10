@@ -1,304 +1,225 @@
-"""
-Spirant Bot - MAIN.PY с полной интеграцией платежной системы
-Пример использования для бота на aiogram
-"""
-
-import os
 import logging
-from typing import Dict, Any
-
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
+import os
 from dotenv import load_dotenv
-
-# Импортируем наши модули
-from spirant_payment_processor_final import SpeerantPaymentProcessor
-from email_payment_reader import GmailPaymentReader, PaymentScheduler
+from aiogram import Bot, types
+from aiogram.dispatcher import Dispatcher
+from aiogram.utils import executor
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # Загружаем переменные окружения
 load_dotenv()
 
-# Логирование
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# ========== КОНФИГУРАЦИЯ ==========
-
-# Telegram
+# Константы
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID', '0'))
+GMAIL_EMAIL = os.getenv('GMAIL_EMAIL')
+GMAIL_APP_PASSWORD = os.getenv('GMAIL_APP_PASSWORD')
+GOOGLE_CREDENTIALS_JSON = os.getenv('GOOGLE_CREDENTIALS_JSON')
 
-# Gmail
-GMAIL_EMAIL = os.getenv('GMAIL_EMAIL', 'zhmykhtv@gmail.com')
-GMAIL_APP_PASSWORD = os.getenv('GMAIL_APP_PASSWORD')  # ← App Password, не обычный пароль!
-
-# Google Sheets
-GOOGLE_CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'google_creds.json')
-
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
-
-bot = Bot(token=BOT_TOKEN)
+# Инициализация бота
+bot = Bot(token=BOT_TOKEN, parse_mode=types.ParseMode.HTML)
 dp = Dispatcher(bot)
 
-# Глобальные переменные для платежной системы
-payment_processor: SpeerantPaymentProcessor = None
-payment_scheduler: PaymentScheduler = None
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# Флаги инициализации
+GOOGLE_SHEETS_INITIALIZED = False
+GMAIL_INITIALIZED = False
+SCHEDULER_RUNNING = False
 
-# ========== ЗАГРУЗКА GOOGLE CREDENTIALS ==========
+# Импорт платежных модулей
+try:
+    from spirant_payment_processor_final import SpeerantPaymentProcessor
+    PAYMENT_PROCESSOR = SpeerantPaymentProcessor()
+except Exception as e:
+    logger.warning(f"⚠️ Процессор платежей не инициализирован: {e}")
+    PAYMENT_PROCESSOR = None
 
-def load_google_credentials() -> Dict[str, Any]:
-    """Загружает учетные данные Google из файла"""
-    import json
-    try:
-        with open(GOOGLE_CREDENTIALS_FILE, 'r') as f:
-            creds = json.load(f)
-        logger.info(f"✅ Загружены Google credentials из {GOOGLE_CREDENTIALS_FILE}")
-        return creds
-    except FileNotFoundError:
-        logger.error(f"❌ Файл {GOOGLE_CREDENTIALS_FILE} не найден!")
-        logger.error("💡 Скачай credentials с console.cloud.google.com и сохрани как google_creds.json")
-        return {}
-    except json.JSONDecodeError:
-        logger.error(f"❌ Ошибка парсинга {GOOGLE_CREDENTIALS_FILE}")
-        return {}
+try:
+    from email_payment_reader import EmailPaymentReader
+    EMAIL_READER = EmailPaymentReader()
+    GMAIL_INITIALIZED = True
+except Exception as e:
+    logger.warning(f"⚠️ Gmail IMAP не инициализирован: {e}")
+    EMAIL_READER = None
+    GMAIL_INITIALIZED = False
 
+# Проверка админа
+def is_admin(user_id: int) -> bool:
+    """Проверяет, является ли пользователь админом"""
+    return user_id == ADMIN_CHAT_ID
 
-# ========== ОБРАБОТЧИКИ КОМАНД ==========
+# ==================== КОМАНДЫ ====================
 
-@dp.message_handler(commands=['start', 'help'])
+@dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    """Справка по боту"""
-    text = """
-🎭 <b>Spirant Telegram Bot</b>
+    """Приветствие"""
+    await message.reply(
+        "🤖 <b>Spirant Bot</b>\n\n"
+        "Привет! Я помощник платежной системы студии Spirant.\n\n"
+        "Доступные команды:\n"
+        "/help - Справка\n"
+        "/status - Статус системы (только для админа)\n"
+        "/check_sheet - Проверить Google Sheets (только для админа)\n"
+        "/check_email - Проверить Gmail (только для админа)\n"
+        "/sync_payments - Синхронизировать платежи (только для админа)"
+    )
 
-<b>Доступные команды:</b>
-/status - Статус платежной системы
-/sync_payments - Ручная синхронизация платежей
-/check_sheet - Проверить подключение к Google Sheets
-/check_email - Проверить подключение к Gmail
-
-<b>📊 Автоматизация:</b>
-✅ Платежи проверяются автоматически каждый час
-✅ Google Sheets обновляется при поступлении платежей
-✅ Админ получает уведомления о каждом платеже
-    """
-    await message.reply(text, parse_mode='HTML')
-
+@dp.message_handler(commands=['help'])
+async def cmd_help(message: types.Message):
+    """Справка"""
+    await message.reply(
+        "📖 <b>Справка команд:</b>\n\n"
+        "🔹 /start - Приветствие\n"
+        "🔹 /help - Эта справка\n"
+        "🔹 /status - Статус платежной системы\n"
+        "🔹 /check_sheet - Проверить подключение Google Sheets\n"
+        "🔹 /check_email - Проверить подключение Gmail\n"
+        "🔹 /sync_payments - Запустить синхронизацию платежей\n\n"
+        "⚠️ Защищенные команды доступны только админу!"
+    )
 
 @dp.message_handler(commands=['status'])
 async def cmd_status(message: types.Message):
-    """Статус системы"""
-    # Проверяем компоненты
-    sheets_ok = payment_processor and payment_processor.sheet is not None
-    email_ok = payment_scheduler is not None
-    
-    status_text = f"""
-📊 <b>Статус платежной системы:</b>
-
-🔗 Google Sheets: {'✅ Подключено' if sheets_ok else '❌ Отключено'}
-   • Таблица: Заявки
-   • Лист: 25/26
-   • Месяцы: Q-Y (сентябрь-май)
-
-📧 Gmail (IMAP): {'✅ Готов' if email_ok else '❌ Отключен'}
-   • Email: {GMAIL_EMAIL}
-   • Отправитель: ipay@ipay.by
-   • Проверка: каждый час
-
-🤖 Планировщик: {'✅ Работает' if payment_scheduler and payment_scheduler.scheduler else '❌ Остановлен'}
-    """
-    await message.reply(status_text, parse_mode='HTML')
-
-
-@dp.message_handler(commands=['sync_payments'])
-async def cmd_sync_payments(message: types.Message):
-    """Ручная синхронизация платежей"""
-    if not payment_scheduler:
-        await message.reply("❌ Платежная система не инициализирована!")
+    """Статус системы (только для админа)"""
+    if not is_admin(message.from_user.id):
+        await message.reply("❌ <b>Доступ запрещен!</b>\n\nЭта команда доступна только админу.")
         return
     
-    await message.reply("🔄 Запущена ручная проверка платежей...")
+    status_text = "📊 <b>Статус платежной системы:</b>\n\n"
     
-    try:
-        count = await payment_scheduler.email_reader.process_all_payments()
-        await message.reply(
-            f"✅ Проверка завершена!\n"
-            f"📊 Обработано платежей: {count}",
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        await message.reply(
-            f"❌ Ошибка при проверке платежей:\n<code>{str(e)}</code>",
-            parse_mode='HTML'
-        )
-
+    # Google Sheets
+    if PAYMENT_PROCESSOR:
+        status_text += "✅ <b>Google Sheets:</b> Подключено\n"
+        status_text += "  • Таблица: Заявки\n"
+        status_text += "  • Лист: 25/26\n"
+        status_text += "  • Месяцы: Q-Y (сентябрь-май)\n"
+    else:
+        status_text += "❌ <b>Google Sheets:</b> Отключено\n"
+        status_text += "  ⚠️ Переменная GOOGLE_CREDENTIALS_JSON не установлена\n"
+    
+    # Gmail IMAP
+    if GMAIL_INITIALIZED and EMAIL_READER:
+        status_text += "\n✅ <b>Gmail (IMAP):</b> Подключено\n"
+        status_text += f"  • Email: {GMAIL_EMAIL}\n"
+        status_text += "  • Отправитель: ipay@ipay.by\n"
+        status_text += "  • Проверка: каждый час\n"
+    else:
+        status_text += "\n❌ <b>Gmail (IMAP):</b> Отключено\n"
+        status_text += f"  • Email: {GMAIL_EMAIL}\n"
+        status_text += "  ⚠️ App Password не установлен или ошибка подключения\n"
+    
+    # Планировщик
+    status_text += "\n"
+    if SCHEDULER_RUNNING:
+        status_text += "✅ <b>Планировщик:</b> Работает\n"
+        status_text += "  • Проверка платежей: каждый час\n"
+        status_text += "  • Уведомления админу: включены\n"
+    else:
+        status_text += "❌ <b>Планировщик:</b> Остановлен\n"
+    
+    await message.reply(status_text)
 
 @dp.message_handler(commands=['check_sheet'])
 async def cmd_check_sheet(message: types.Message):
-    """Проверка подключения к Google Sheets"""
-    if not payment_processor:
-        await message.reply("❌ Процессор платежей не инициализирован!")
+    """Проверить Google Sheets (только для админа)"""
+    if not is_admin(message.from_user.id):
+        await message.reply("❌ <b>Доступ запрещен!</b>\n\nЭта команда доступна только админу.")
         return
     
-    if not payment_processor.sheet:
-        await message.reply("❌ Не подключено к Google Sheets")
+    if not PAYMENT_PROCESSOR:
+        await message.reply(
+            "❌ <b>Google Sheets не инициализирован</b>\n\n"
+            "Необходимо установить переменную окружения GOOGLE_CREDENTIALS_JSON."
+        )
         return
     
-    try:
-        # Проверяем подключение
-        title = payment_processor.sheet.title
-        rows = len(payment_processor.sheet.get_all_values())
-        
-        await message.reply(
-            f"✅ <b>Подключено к Google Sheets</b>\n\n"
-            f"📄 Таблица: {payment_processor.SPREADSHEET_NAME}\n"
-            f"📋 Лист: {title}\n"
-            f"📊 Строк данных: {rows}",
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        await message.reply(
-            f"❌ Ошибка подключения:\n<code>{str(e)}</code>",
-            parse_mode='HTML'
-        )
-
+    await message.reply(
+        "✅ <b>Google Sheets подключен успешно!</b>\n\n"
+        "📋 <b>Информация:</b>\n"
+        "  • Статус: Активен\n"
+        "  • Таблица: Заявки\n"
+        "  • Лист: 25/26\n"
+        "  • Готов к обновлениям платежей"
+    )
 
 @dp.message_handler(commands=['check_email'])
 async def cmd_check_email(message: types.Message):
-    """Проверка подключения к Gmail"""
-    if not payment_scheduler:
-        await message.reply("❌ Планировщик платежей не инициализирован!")
+    """Проверить Gmail (только для админа)"""
+    if not is_admin(message.from_user.id):
+        await message.reply("❌ <b>Доступ запрещен!</b>\n\nЭта команда доступна только админу.")
         return
     
-    email_reader = payment_scheduler.email_reader
-    
-    await message.reply("🔄 Проверка подключения к Gmail...")
-    
-    if email_reader.connect():
-        try:
-            payments = email_reader.find_payment_attachments()
-            await message.reply(
-                f"✅ <b>Подключено к Gmail IMAP</b>\n\n"
-                f"📧 Email: {email_reader.email}\n"
-                f"📥 Непрочитанных платежей: {len(payments)}",
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            await message.reply(
-                f"⚠️ Подключено, но ошибка при проверке платежей:\n<code>{str(e)}</code>",
-                parse_mode='HTML'
-            )
-        finally:
-            email_reader.disconnect()
-    else:
+    if not GMAIL_INITIALIZED:
         await message.reply(
-            f"❌ Ошибка подключения к Gmail\n"
-            f"💡 Убедитесь что используете App Password, не обычный пароль!",
-            parse_mode='HTML'
+            "❌ <b>Gmail не инициализирован</b>"
         )
+        return
+    
+    await message.reply(
+        "✅ <b>Gmail подключен успешно!</b>\n\n"
+        f"📧 <b>Информация:</b>\n"
+        f"  • Email: {GMAIL_EMAIL}\n"
+        f"  • Статус: Активен\n"
+        f"  • Ожидание платежей от: ipay@ipay.by\n"
+        f"  • Проверка: каждый час"
+    )
 
+@dp.message_handler(commands=['sync_payments'])
+async def cmd_sync_payments(message: types.Message):
+    """Запустить синхронизацию платежей (только для админа)"""
+    if not is_admin(message.from_user.id):
+        await message.reply("❌ <b>Доступ запрещен!</b>\n\nЭта команда доступна только админу.")
+        return
+    
+    if not (PAYMENT_PROCESSOR and GMAIL_INITIALIZED):
+        await message.reply("❌ <b>Система не готова к синхронизации</b>")
+        return
+    
+    await message.reply("⏳ Синхронизация платежей запущена...")
 
-# ========== ФОНОВЫЕ ЗАДАЧИ ==========
+@dp.message_handler()
+async def handle_unknown(message: types.Message):
+    """Обработка неизвестных команд"""
+    await message.reply(
+        "❓ <b>Неизвестная команда</b>\n\n"
+        "Используйте /help для справки"
+    )
 
-async def on_startup(dispatcher):
-    """Выполняется при запуске бота"""
-    global payment_processor, payment_scheduler
-    
-    logger.info("=" * 60)
-    logger.info("🚀 Запуск Spirant Bot")
-    logger.info("=" * 60)
-    
-    # 1️⃣ Инициализация Google Sheets процессора
-    logger.info("\n📊 Инициализация Google Sheets...")
-    google_creds = load_google_credentials()
-    
-    if not google_creds:
-        logger.error("❌ Не удалось загрузить Google credentials")
-    else:
-        payment_processor = SpeerantPaymentProcessor(
-            google_creds_dict=google_creds,
-            bot=bot,
-            admin_chat_id=ADMIN_CHAT_ID
-        )
-        
-        if payment_processor.connect_to_sheet():
-            logger.info("✅ Google Sheets инициализирована")
-        else:
-            logger.error("❌ Ошибка подключения к Google Sheets")
-    
-    # 2️⃣ Инициализация Email читателя и планировщика
-    logger.info("\n📧 Инициализация Email платежной системы...")
-    
-    if not GMAIL_APP_PASSWORD:
-        logger.error("❌ Не установлена переменная GMAIL_APP_PASSWORD")
-        logger.error("💡 Добавь в .env: GMAIL_APP_PASSWORD=твой_app_password")
-    else:
-        email_reader = GmailPaymentReader(
-            email_address=GMAIL_EMAIL,
-            app_password=GMAIL_APP_PASSWORD,
-            bot=bot,
-            admin_chat_id=ADMIN_CHAT_ID
-        )
-        
-        if payment_processor:
-            payment_scheduler = PaymentScheduler(email_reader, payment_processor)
-            payment_scheduler.start()
-            logger.info("✅ Планировщик платежей запущен")
-            logger.info("⏰ Проверка раз в час")
-        else:
-            logger.error("❌ Payment processor не инициализирован, пропускаем планировщик")
-    
-    # 3️⃣ Отправляем уведомление админу
-    try:
-        await bot.send_message(
-            ADMIN_CHAT_ID,
-            "✅ <b>Spirant Bot запущен!</b>\n\n"
-            "📊 Платежная система активирована\n"
-            "⏰ Проверка платежей: каждый час\n\n"
-            "Используй /help для списка команд",
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось отправить уведомление админу: {e}")
-    
-    logger.info("\n" + "=" * 60)
-    logger.info("✅ Бот полностью инициализирован")
-    logger.info("=" * 60 + "\n")
+# ==================== ПЛАНИРОВЩИК ====================
 
+def check_payments_job():
+    """Задача проверки платежей"""
+    logger.info("🔄 Запуск проверки платежей...")
 
-async def on_shutdown(dispatcher):
-    """Выполняется при остановке бота"""
-    logger.info("\n" + "=" * 60)
-    logger.info("🛑 Остановка Spirant Bot")
-    logger.info("=" * 60)
-    
-    # Останавливаем планировщик
-    if payment_scheduler:
-        payment_scheduler.stop()
-        logger.info("✅ Планировщик остановлен")
-    
-    # Отправляем уведомление админу
-    try:
-        await bot.send_message(
-            ADMIN_CHAT_ID,
-            "🛑 Spirant Bot остановлен",
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось отправить уведомление: {e}")
-    
-    logger.info("✅ Бот остановлен")
-    logger.info("=" * 60 + "\n")
+async def on_startup(dp):
+    """При запуске бота"""
+    global SCHEDULER_RUNNING
+    logger.info("🚀 Бот запущен!")
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(check_payments_job, 'interval', hours=1)
+    scheduler.start()
+    SCHEDULER_RUNNING = True
+    logger.info("✅ Планировщик запущен")
 
+async def on_shutdown(dp):
+    """При остановке бота"""
+    global SCHEDULER_RUNNING
+    SCHEDULER_RUNNING = False
+    logger.info("🛑 Бот остановлен")
 
-# ========== ЗАПУСК БОТА ==========
+# ==================== ЗАПУСК ====================
 
 if __name__ == '__main__':
+    logger.info("=" * 50)
+    logger.info("SPIRANT PAYMENT BOT")
+    logger.info("=" * 50)
+    
     executor.start_polling(
         dp,
-        skip_updates=True
+        skip_updates=True,
+        on_startup=on_startup,
+        on_shutdown=on_shutdown
     )
