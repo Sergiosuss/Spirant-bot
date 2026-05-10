@@ -41,7 +41,7 @@ class EmailPaymentReader:
         """Ищет письма с платежами от ipay@ipay.by"""
         try:
             self.imap.select("INBOX")
-            status, messages = self.imap.search(None, 'FROM', 'zhmykhtv@gmail.com')
+            status, messages = self.imap.search(None, 'FROM', 'ipay@ipay.by')
             
             if status != 'OK':
                 return []
@@ -147,13 +147,13 @@ class EmailPaymentReader:
         date_match = re.search(date_pattern, email_body)
         if date_match:
             payment['date'] = f"{date_match.group(3)}.{date_match.group(2)}.{date_match.group(1)}"
-            payment['month'] = int(date_match.group(2))
+            payment['month_num'] = int(date_match.group(2))
             payment['year'] = date_match.group(1)
-            logger.info(f"✅ Дата: {payment['date']}, месяц: {payment['month']}")
+            logger.info(f"✅ Дата: {payment['date']}, месяц: {payment['month_num']}")
         
         if not payment.get('contract'):
             logger.error(f"❌ Номер договора не найден!")
-        if not payment.get('month'):
+        if not payment.get('month_num'):
             logger.error(f"❌ Дата не найдена!")
         
         return payment
@@ -170,7 +170,7 @@ class EmailPaymentReader:
             for attachment in attachments:
                 payment = self.parse_payment_email(attachment)
                 
-                if payment.get('contract') and payment.get('amount') and payment.get('month'):
+                if payment.get('contract') and payment.get('amount') and payment.get('month_num'):
                     logger.info(f"✅ New: {payment.get('contract')}")
                     payments.append(payment)
                 else:
