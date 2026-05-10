@@ -12,7 +12,7 @@ from aiogram.utils import executor
 from dotenv import load_dotenv
 
 # Импортируем наши модули
-from payment_processor import SpeerantPaymentProcessor
+from spirant_payment_processor_final import SpeerantPaymentProcessor
 from email_payment_reader import GmailPaymentReader, PaymentScheduler
 
 # Загружаем переменные окружения
