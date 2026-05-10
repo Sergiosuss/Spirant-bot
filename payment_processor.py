@@ -7,7 +7,7 @@ import base64
 
 logger = logging.getLogger(__name__)
 
-class PaymentProcessor:
+class SpeerantPaymentProcessor:  # ← ПРАВИЛЬНОЕ ИМЯ
     def __init__(self):
         self.sheet_id = "1ZTDM8Ea-niTFVPly2ElrUQ00ztlGRFBWhE-seIrMnwY"
         self.sheet_name = "25/26"
@@ -74,7 +74,7 @@ class PaymentProcessor:
             
             cell = f"{self.sheet_name}!{col}{row}"
             
-            # ПИШЕМ СУММУ, А НЕ ДРОБИ!
+            # ПИШЕМ СУММУ КРАСНЫМ!
             self.service.spreadsheets().values().update(
                 spreadsheetId=self.sheet_id,
                 range=cell,
