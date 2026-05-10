@@ -7,7 +7,7 @@ import base64
 
 logger = logging.getLogger(__name__)
 
-class SpeerantPaymentProcessor:  # ← ПРАВИЛЬНОЕ ИМЯ
+class PaymentProcessor:  # ← ПРАВИЛЬНОЕ ИМЯ (без Speerant)
     def __init__(self):
         self.sheet_id = "1ZTDM8Ea-niTFVPly2ElrUQ00ztlGRFBWhE-seIrMnwY"
         self.sheet_name = "25/26"
