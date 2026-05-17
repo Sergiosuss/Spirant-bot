@@ -41,7 +41,7 @@ class EmailPaymentReader:
         """Ищет письма с платежами от ipay@ipay.by"""
         try:
             self.imap.select("INBOX")
-            status, messages = self.imap.search(None, 'FROM', 'izhmykhtv@gmail.com')
+            status, messages = self.imap.search(None, 'UNSEEN', 'FROM', 'izhmykhtv@gmail.com')
             
             if status != 'OK':
                 return []
@@ -78,6 +78,9 @@ class EmailPaymentReader:
                                             text = content.decode(encoding)
                                             logger.info(f" ✅ Кодировка: {encoding}")
                                             attachments.append(text)
+                                            # Помечаем письмо как прочитанное
+                                            self.imap.store(email_id, '+FLAGS', '\\Seen')
+                                            logger.info(f" ✅ Письмо помечено как прочитанное")
                                             break
                                         except:
                                             continue
