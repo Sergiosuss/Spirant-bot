@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from aiogram import Bot, types
 from aiogram.dispatcher import Dispatcher
 from aiogram.utils import executor
+from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Импортируем модули
@@ -329,28 +330,40 @@ async def check_payments_job():
 async def on_startup(dp):
     """При запуске бота"""
     global SCHEDULER_RUNNING
-    
+
     logger.info("=" * 60)
-    logger.info("🚀 SPIRANT PAYMENT BOT - ЗАПУСК")
+    logger.info("SPIRANT PAYMENT BOT - ZAPUSK")
     logger.info("=" * 60)
-    logger.info(f"✅ BOT_TOKEN: loaded")
-    logger.info(f"✅ ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
-    logger.info(f"📧 GMAIL_EMAIL: {GMAIL_EMAIL if GMAIL_EMAIL else '❌'}")
+    logger.info("BOT_TOKEN: loaded")
+    logger.info(f"ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
+    logger.info(f"GMAIL_EMAIL: {GMAIL_EMAIL if GMAIL_EMAIL else 'net'}")
     logger.info("=" * 60)
-    
+
     # Инициализируем модули
     init_modules()
-    
+
+    # HTTP-сервер для Render
+    async def health(request):
+        return web.Response(text="OK")
+
+    _app = web.Application()
+    _app.router.add_get("/", health)
+    _runner = web.AppRunner(_app)
+    await _runner.setup()
+    _port = int(os.getenv("PORT", 10000))
+    _site = web.TCPSite(_runner, "0.0.0.0", _port)
+    await _site.start()
+    logger.info(f"HTTP server started on port {_port}")
+
     # Запуск планировщика
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_payments_job, 'interval', hours=1)
     scheduler.start()
     SCHEDULER_RUNNING = True
-    
-    logger.info("✅ Бот запущен!")
-    logger.info("✅ Планировщик запущен (проверка каждый час)")
-    logger.info("=" * 60)
 
+    logger.info("Bot started!")
+    logger.info("Scheduler started (check every hour)")
+    logger.info("=" * 60)
 async def on_shutdown(dp):
     """При остановке бота"""
     global SCHEDULER_RUNNING
