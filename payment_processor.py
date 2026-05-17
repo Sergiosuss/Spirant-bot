@@ -15,18 +15,8 @@ class SpeerantPaymentProcessor:
     CONTRACT_COL = "K"
     NAME_COL = "B"
 
-    # Месяц (число) → столбец
-    MONTH_TO_COL = {
-        9: "Q",   # Сентябрь
-        10: "R",  # Октябрь
-        11: "S",  # Ноябрь
-        12: "T",  # Декабрь
-        1: "U",   # Январь
-        2: "V",   # Февраль
-        3: "W",   # Март
-        4: "X",   # Апрель
-        5: "Y",   # Май
-    }
+    # Q=Сентябрь, R=Октябрь, ..., Y=Май
+    MONTHS_COLUMNS = ["Q", "R", "S", "T", "U", "V", "W", "X", "Y"]
 
     def __init__(self, google_creds_dict: dict, bot=None, admin_chat_id: int = None):
         self.gc = gspread.service_account_from_dict(google_creds_dict)
@@ -68,8 +58,10 @@ class SpeerantPaymentProcessor:
             contract_clean = re.sub(r'\s+', '', contract_num).upper()
 
             for i, cell_value in enumerate(contracts):
+                if not cell_value or not cell_value.strip():
+                    continue  # пустые ячейки не совпадают никогда
                 cell_clean = re.sub(r'\s+', '', str(cell_value)).upper()
-                if contract_clean in cell_clean or cell_clean in contract_clean:
+                if contract_clean == cell_clean or contract_clean in cell_clean:
                     logger.info(f"Contract {contract_num} found at row {i + 1}")
                     return i + 1
 
@@ -86,6 +78,8 @@ class SpeerantPaymentProcessor:
             names = self.sheet.col_values(col_num)
 
             for i, cell_value in enumerate(names):
+                if not cell_value or not cell_value.strip():
+                    continue
                 if last_name in str(cell_value).lower():
                     logger.info(f"Name '{fio}' found at row {i + 1}")
                     return i + 1
@@ -96,6 +90,36 @@ class SpeerantPaymentProcessor:
             logger.error(f"Error searching by name: {e}")
             return None
 
+    def find_first_empty_month_cell(self, row_num: int) -> Optional[str]:
+        """
+        Первая ПУСТАЯ (не 0, не число) ячейка в столбцах Q-Y.
+        0 = намеренно пропущен месяц (больничный и т.п.) — тоже пропускаем.
+        """
+        try:
+            row_values = self.sheet.row_values(row_num)
+
+            for col_letter in self.MONTHS_COLUMNS:
+                col_num = self.col_letter_to_num(col_letter)
+                cell_index = col_num - 1
+
+                if cell_index >= len(row_values):
+                    logger.info(f"First empty cell: {col_letter}{row_num} (beyond row length)")
+                    return col_letter
+
+                cell_value = row_values[cell_index].strip()
+                if not cell_value:  # пустая строка — сюда пишем
+                    logger.info(f"First empty cell: {col_letter}{row_num}")
+                    return col_letter
+
+                logger.info(f"  {col_letter}{row_num}: '{cell_value}' — skip")
+
+            logger.warning(f"No empty cells in row {row_num} (Q-Y)")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error finding empty cell: {e}")
+            return None
+
     def update_payment(self, payment_data: Dict) -> Tuple[bool, str]:
         if not self.sheet:
             return False, "Sheet not connected"
@@ -103,9 +127,8 @@ class SpeerantPaymentProcessor:
         contract = payment_data.get('contract')
         fio = payment_data.get('fio')
         amount = payment_data.get('amount', '0')
-        month_num = payment_data.get('month_num')
 
-        # Найти строку
+        # Найти строку: сначала по договору, потом по имени
         row_num = None
         if contract:
             row_num = self.find_row_by_contract(contract)
@@ -115,23 +138,12 @@ class SpeerantPaymentProcessor:
         if not row_num:
             return False, f"Row not found for {contract or fio}"
 
-        # Определить столбец по месяцу
-        col = self.MONTH_TO_COL.get(month_num)
+        # Первая пустая ячейка в Q-Y
+        col = self.find_first_empty_month_cell(row_num)
         if not col:
-            return False, f"Unknown month: {month_num}"
+            return False, f"No empty cells in row {row_num}"
 
         cell_addr = f"{col}{row_num}"
-        logger.info(f"Target cell: {cell_addr} (month {month_num})")
-
-        # Проверить — уже есть значение?
-        try:
-            current = self.sheet.acell(cell_addr).value or ''
-            current = current.strip()
-            if current and current != '0':
-                logger.warning(f"Cell {cell_addr} already has value: {current}, overwriting")
-        except Exception as e:
-            logger.warning(f"Could not read cell {cell_addr}: {e}")
-
         try:
             self.sheet.update(cell_addr, [[amount]])
             logger.info(f"Payment written: {contract} → {cell_addr} = {amount}")
