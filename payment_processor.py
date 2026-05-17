@@ -12,7 +12,7 @@ class SpeerantPaymentProcessor:
     SPREADSHEET_NAME = "Заявки"
     SHEET_NAME = "25/26"
 
-    CONTRACT_COL = "J"
+    CONTRACT_COL = "K"
     NAME_COL = "B"
 
     # Месяц (число) → столбец
