@@ -34,6 +34,18 @@ class SpeerantPaymentProcessor:
             result = result * 26 + (ord(char) - ord('A') + 1)
         return result
 
+
+    @staticmethod
+    def format_amount(amount_str: str) -> str:
+        """184.00 -> 184, 184.50 -> 184,50"""
+        try:
+            value = float(amount_str.replace(",", "."))
+            if value == int(value):
+                return str(int(value))
+            return f"{value:.2f}".replace(".", ",")
+        except Exception:
+            return amount_str
+
     def connect_to_sheet(self) -> bool:
         try:
             logger.info(f"Connecting to spreadsheet '{self.SPREADSHEET_NAME}'...")
@@ -126,7 +138,8 @@ class SpeerantPaymentProcessor:
 
         contract = payment_data.get('contract')
         fio = payment_data.get('fio')
-        amount = payment_data.get('amount', '0')
+        raw_amount = payment_data.get('amount', '0')
+        amount = self.format_amount(raw_amount)
 
         # Найти строку: сначала по договору, потом по имени
         row_num = None
