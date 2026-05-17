@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from aiogram import Bot, types
 from aiogram.dispatcher import Dispatcher
 from aiogram.utils import executor
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Импортируем модули
 from email_reader import EmailPaymentReader
@@ -342,7 +342,7 @@ async def on_startup(dp):
     init_modules()
     
     # Запуск планировщика
-    scheduler = BackgroundScheduler()
+    scheduler = AsyncIOScheduler()
     scheduler.add_job(check_payments_job, 'interval', hours=1)
     scheduler.start()
     SCHEDULER_RUNNING = True
