@@ -1,21 +1,27 @@
 import re
 import gspread
 import logging
+from datetime import datetime
 from typing import Dict, Optional, Tuple
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+MONTH_NAMES = {
+    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
+    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель", 5: "Май"
+}
 
 
 class SpeerantPaymentProcessor:
 
     SPREADSHEET_NAME = "Заявки"
     SHEET_NAME = "25/26"
+    ERRORS_SHEET_NAME = "Ошибки"
 
     CONTRACT_COL = "K"
     NAME_COL = "B"
 
-    # Q=Сентябрь, R=Октябрь, ..., Y=Май
     MONTHS_COLUMNS = ["Q", "R", "S", "T", "U", "V", "W", "X", "Y"]
 
     def __init__(self, google_creds_dict: dict, bot=None, admin_chat_id: int = None):
@@ -25,6 +31,7 @@ class SpeerantPaymentProcessor:
         self.spreadsheet = None
         self.sheet = None
         self.sheet_id = None
+        self.errors_sheet = None
         logger.info("SpeerantPaymentProcessor initialized")
 
     @staticmethod
@@ -34,10 +41,8 @@ class SpeerantPaymentProcessor:
             result = result * 26 + (ord(char) - ord('A') + 1)
         return result
 
-
     @staticmethod
     def format_amount(amount_str: str) -> str:
-        """184.00 -> 184, 184.50 -> 184,50"""
         try:
             value = float(amount_str.replace(",", "."))
             if value == int(value):
@@ -58,10 +63,43 @@ class SpeerantPaymentProcessor:
                 self.sheet_id = 1
                 logger.warning("Could not get sheet ID, using fallback: 1")
             logger.info(f"Connected to sheet '{self.SHEET_NAME}'")
+            self._init_errors_sheet()
             return True
         except Exception as e:
             logger.error(f"Google Sheets connection error: {e}")
             return False
+
+    def _init_errors_sheet(self):
+        try:
+            self.errors_sheet = self.spreadsheet.worksheet(self.ERRORS_SHEET_NAME)
+            logger.info("Error sheet found")
+        except gspread.WorksheetNotFound:
+            self.errors_sheet = self.spreadsheet.add_worksheet(
+                title=self.ERRORS_SHEET_NAME, rows=1000, cols=6
+            )
+            self.errors_sheet.append_row(
+                ["Дата", "Договор", "ФИО", "Сумма", "Месяц", "Причина"],
+                value_input_option="RAW"
+            )
+            logger.info("Error sheet created")
+
+    def log_error_to_sheet(self, payment_data: Dict, reason: str):
+        if not self.errors_sheet:
+            return
+        try:
+            month_num = payment_data.get("month_num")
+            row = [
+                datetime.now().strftime("%d.%m.%Y %H:%M"),
+                payment_data.get("contract", "-"),
+                payment_data.get("fio", "-"),
+                self.format_amount(payment_data.get("amount", "0")),
+                MONTH_NAMES.get(month_num, str(month_num)) if month_num else "-",
+                reason,
+            ]
+            self.errors_sheet.append_row(row, value_input_option="RAW")
+            logger.info(f"Error logged: {reason}")
+        except Exception as e:
+            logger.warning(f"Could not write to error sheet: {e}")
 
     def find_row_by_contract(self, contract_num: str) -> Optional[int]:
         try:
@@ -71,7 +109,7 @@ class SpeerantPaymentProcessor:
 
             for i, cell_value in enumerate(contracts):
                 if not cell_value or not cell_value.strip():
-                    continue  # пустые ячейки не совпадают никогда
+                    continue
                 cell_clean = re.sub(r'\s+', '', str(cell_value)).upper()
                 if contract_clean == cell_clean or contract_clean in cell_clean:
                     logger.info(f"Contract {contract_num} found at row {i + 1}")
@@ -103,10 +141,6 @@ class SpeerantPaymentProcessor:
             return None
 
     def find_first_empty_month_cell(self, row_num: int) -> Optional[str]:
-        """
-        Первая ПУСТАЯ (не 0, не число) ячейка в столбцах Q-Y.
-        0 = намеренно пропущен месяц (больничный и т.п.) — тоже пропускаем.
-        """
         try:
             row_values = self.sheet.row_values(row_num)
 
@@ -115,19 +149,18 @@ class SpeerantPaymentProcessor:
                 cell_index = col_num - 1
 
                 if cell_index >= len(row_values):
-                    logger.info(f"First empty cell: {col_letter}{row_num} (beyond row length)")
-                    return col_letter
-
-                cell_value = row_values[cell_index].strip()
-                if not cell_value:  # пустая строка — сюда пишем
                     logger.info(f"First empty cell: {col_letter}{row_num}")
                     return col_letter
 
-                logger.info(f"  {col_letter}{row_num}: '{cell_value}' — skip")
+                cell_value = row_values[cell_index].strip()
+                if not cell_value:
+                    logger.info(f"First empty cell: {col_letter}{row_num}")
+                    return col_letter
+
+                logger.info(f"  {col_letter}{row_num}: '{cell_value}' - skip")
 
             logger.warning(f"No empty cells in row {row_num} (Q-Y)")
             return None
-
         except Exception as e:
             logger.error(f"Error finding empty cell: {e}")
             return None
@@ -138,10 +171,8 @@ class SpeerantPaymentProcessor:
 
         contract = payment_data.get('contract')
         fio = payment_data.get('fio')
-        raw_amount = payment_data.get('amount', '0')
-        amount = self.format_amount(raw_amount)
+        amount = self.format_amount(payment_data.get('amount', '0'))
 
-        # Найти строку: сначала по договору, потом по имени
         row_num = None
         if contract:
             row_num = self.find_row_by_contract(contract)
@@ -149,22 +180,27 @@ class SpeerantPaymentProcessor:
             logger.info("Contract not found, searching by name...")
             row_num = self.find_row_by_name(fio)
         if not row_num:
-            return False, f"Row not found for {contract or fio}"
+            reason = f"Не найден в таблице: {contract or fio}"
+            self.log_error_to_sheet(payment_data, reason)
+            return False, reason
 
-        # Первая пустая ячейка в Q-Y
         col = self.find_first_empty_month_cell(row_num)
         if not col:
-            return False, f"No empty cells in row {row_num}"
+            reason = f"Все ячейки заняты в строке {row_num}"
+            self.log_error_to_sheet(payment_data, reason)
+            return False, reason
 
         cell_addr = f"{col}{row_num}"
         try:
             self.sheet.update(cell_addr, [[amount]])
-            logger.info(f"Payment written: {contract} → {cell_addr} = {amount}")
+            logger.info(f"Payment written: {contract} -> {cell_addr} = {amount}")
             self.apply_red_color(row_num, col)
             return True, cell_addr
         except Exception as e:
+            reason = str(e)
+            self.log_error_to_sheet(payment_data, reason)
             logger.error(f"Error updating cell {cell_addr}: {e}")
-            return False, str(e)
+            return False, reason
 
     def apply_red_color(self, row: int, col: str):
         try:
@@ -196,7 +232,7 @@ class SpeerantPaymentProcessor:
             logger.warning(f"Could not apply red color: {e}")
 
     def process_payments(self, payments: list) -> dict:
-        result = {'successful': 0, 'failed': 0}
+        result = {'successful': 0, 'failed': 0, 'errors': []}
         for payment in payments:
             success, message = self.update_payment(payment)
             if success:
@@ -204,6 +240,12 @@ class SpeerantPaymentProcessor:
                 logger.info(f"OK: {message}")
             else:
                 result['failed'] += 1
+                result['errors'].append({
+                    'contract': payment.get('contract', '-'),
+                    'fio': payment.get('fio', '-'),
+                    'amount': self.format_amount(payment.get('amount', '0')),
+                    'reason': message,
+                })
                 logger.warning(f"FAIL: {message}")
         logger.info(f"Processed: {result['successful']}/{len(payments)} successful")
         return result

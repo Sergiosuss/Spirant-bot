@@ -273,9 +273,16 @@ async def cmd_sync(message: types.Message):
         response += f"📊 <b>Результаты:</b>\n"
         response += f"  • Всего: {result['successful'] + result['failed']}\n"
         response += f"  • Успешно: {result['successful']} ✅\n"
-        response += f"  • Ошибок: {result['failed']} ❌\n\n"
-        response += "🔴 Все платежи написаны <b>красным цветом</b>\n"
-        
+        response += f"  • Ошибок: {result['failed']} ❌\n"
+
+        if result.get('errors'):
+            response += "\n⚠️ <b>Не разнесены (см. лист «Ошибки»):</b>\n"
+            for err in result['errors']:
+                response += f"  • {err['contract']} {err['fio']} — {err['amount']} руб.\n"
+                response += f"    <i>{err['reason']}</i>\n"
+        elif result['successful']:
+            response += "\n🔴 Все платежи записаны <b>красным цветом</b>\n"
+
         await message.reply(response)
     
     except Exception as e:
@@ -314,9 +321,16 @@ async def check_payments_job():
         # Отправляем уведомление админу
         message_text = f"📬 <b>Найдены новые платежи!</b>\n\n"
         message_text += f"✅ Успешно: {result['successful']}\n"
-        message_text += f"❌ Ошибок: {result['failed']}\n\n"
-        message_text += "🔴 Платежи обновлены <b>красным цветом</b>\n"
-        
+        message_text += f"❌ Ошибок: {result['failed']}\n"
+
+        if result.get('errors'):
+            message_text += "\n⚠️ <b>Не разнесены (см. лист «Ошибки»):</b>\n"
+            for err in result['errors']:
+                message_text += f"  • {err['contract']} {err['fio']} — {err['amount']} руб.\n"
+                message_text += f"    <i>{err['reason']}</i>\n"
+        elif result['successful']:
+            message_text += "\n🔴 Платежи обновлены <b>красным цветом</b>\n"
+
         await bot.send_message(ADMIN_CHAT_ID, message_text)
         logger.info(f"✅ Платежи обработаны и админ уведомлён")
     
